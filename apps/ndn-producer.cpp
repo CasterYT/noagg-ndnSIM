@@ -24,9 +24,23 @@
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
 
+#include "ns3/ptr.h"
+#include "ns3/log.h"
+#include "ns3/simulator.h"
+#include "ns3/packet.h"
+#include "ns3/callback.h"
+#include "ns3/string.h"
+#include "ns3/boolean.h"
+#include "ns3/uinteger.h"
+#include "ns3/integer.h"
+#include "ns3/double.h"
+
 #include "model/ndn-l3-protocol.hpp"
 #include "helper/ndn-fib-helper.hpp"
+#include "ModelData.hpp"
 
+#include <random>
+#include <vector>
 #include <memory>
 
 NS_LOG_COMPONENT_DEFINE("ndn.Producer");
@@ -46,6 +60,8 @@ Producer::GetTypeId(void)
       .AddConstructor<Producer>()
       .AddAttribute("Prefix", "Prefix, for which producer has the data", StringValue("/"),
                     MakeNameAccessor(&Producer::m_prefix), MakeNameChecker())
+      .AddAttribute("PrefixNum", "Prefix number", IntegerValue(),
+                    MakeIntegerAccessor(&Producer::m_prefixnum), MakeIntegerChecker<int32_t>())
       .AddAttribute(
          "Postfix",
          "Postfix that is added to the output data (e.g., for adding producer-uniqueness)",
@@ -94,8 +110,7 @@ void
 Producer::OnInterest(shared_ptr<const Interest> interest)
 {
   App::OnInterest(interest); // tracing inside
-
-  NS_LOG_FUNCTION(this << interest);
+  //NS_LOG_FUNCTION(this << interest);
 
   if (!m_active)
     return;
@@ -108,7 +123,24 @@ Producer::OnInterest(shared_ptr<const Interest> interest)
   data->setName(dataName);
   data->setFreshnessPeriod(::ndn::time::milliseconds(m_freshness.GetMilliSeconds()));
 
-  data->setContent(make_shared< ::ndn::Buffer>(m_virtualPayloadSize));
+  // generate new data content
+  // new data format and generate random 300 model parameters
+  ModelData modelData;
+
+  std::default_random_engine generator(std::random_device{}()); // create random generator
+  std::uniform_real_distribution<float> distribution(0.0f, 10.0f); // define range (0.0, 10.0)
+  modelData.parameters.clear(); // clear the previous result
+  for (int i = 0; i < 300; ++i){
+      modelData.parameters.push_back(distribution(generator)); // generate random float range (0.0, 10.0)
+  }
+
+  std::vector<uint8_t> buffer;
+  serializeModelData(modelData, buffer); // serialize data packet
+  data->setContent(make_shared< ::ndn::Buffer>(buffer.begin(), buffer.end()));
+
+  // end of data content
+
+
 
   SignatureInfo signatureInfo(static_cast< ::ndn::tlv::SignatureTypeValue>(255));
 
@@ -123,7 +155,7 @@ Producer::OnInterest(shared_ptr<const Interest> interest)
   encoder.appendVarNumber(m_signature);
   data->setSignatureValue(encoder.getBuffer());
 
-  NS_LOG_INFO("node(" << GetNode()->GetId() << ") responding with Data: " << data->getName());
+  NS_LOG_INFO(m_prefix << " -> node(" << GetNode()->GetId() << ") responding with Data: " << data->getName());
 
   // to create real wire encoding
   data->wireEncode();

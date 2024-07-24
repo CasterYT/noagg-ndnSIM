@@ -20,6 +20,12 @@
 #ifndef NDN_APP_H
 #define NDN_APP_H
 
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <map>
+
 #include "ns3/ndnSIM/model/ndn-common.hpp"
 #include "ns3/ndnSIM/model/ndn-app-link-service.hpp"
 #include "ns3/ndnSIM/NFD/daemon/face/face.hpp"
@@ -28,6 +34,9 @@
 #include "ns3/ptr.h"
 #include "ns3/callback.h"
 #include "ns3/traced-callback.h"
+
+#include <vector>
+#include <string>
 
 namespace ns3 {
 
@@ -80,6 +89,20 @@ public:
   virtual void
   OnNack(shared_ptr<const lp::Nack> nack);
 
+
+    // Old design, need to be deleted later
+  void
+  AddLinkInfo(const std::string& filename);
+
+
+
+  // New design to implement algorithm
+  void
+  ConstructAggregationTree();
+
+
+
+
 public:
   typedef void (*InterestTraceCallback)(shared_ptr<const Interest>, Ptr<App>, shared_ptr<Face>);
   typedef void (*DataTraceCallback)(shared_ptr<const Data>, Ptr<App>, shared_ptr<Face>);
@@ -99,7 +122,20 @@ protected:
   virtual void
   StopApplication(); ///< @brief Called at time specified by Stop
 
+  std::set<std::string>
+  findLeafNodes(const std::string& key, const std::map<std::string, std::vector<std::string>>& treeMap);
+
+  std::map<std::string, std::set<std::string>>
+  getLeafNodes(const std::string& key, const std::map<std::string, std::vector<std::string>>& treeMap);
+
+
+// New design for tree topology to get child node info
+public:
+
+    std::map<std::string, std::vector<std::string>> m_linkInfo;
+
 protected:
+
   bool m_active; ///< @brief Flag to indicate that application is active (set by StartApplication and StopApplication)
   shared_ptr<Face> m_face;
   AppLinkService* m_appLink;

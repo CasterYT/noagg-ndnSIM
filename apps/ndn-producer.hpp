@@ -20,6 +20,13 @@
 #ifndef NDN_PRODUCER_H
 #define NDN_PRODUCER_H
 
+#include <set>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <string>
+#include <numeric>
+
 #include "ns3/ndnSIM/model/ndn-common.hpp"
 
 #include "ndn-app.hpp"
@@ -67,6 +74,8 @@ private:
 
   uint32_t m_signature;
   Name m_keyLocator;
+
+  uint32_t m_prefixnum; //customized
 };
 
 } // namespace ndn

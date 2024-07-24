@@ -17,6 +17,11 @@
  * ndnSIM, e.g., in COPYING.md file.  If not, see <http://www.gnu.org/licenses/>.
  **/
 
+#include <iostream>
+#include <vector>
+#include <string>
+#include <sstream>
+
 #include "ndn-consumer.hpp"
 #include "ns3/ptr.h"
 #include "ns3/log.h"
@@ -53,7 +58,6 @@ Consumer::GetTypeId(void)
       .SetParent<App>()
       .AddAttribute("StartSeq", "Initial sequence number", IntegerValue(0),
                     MakeIntegerAccessor(&Consumer::m_seq), MakeIntegerChecker<int32_t>())
-
       .AddAttribute("Prefix", "Name of the Interest", StringValue("/"),
                     MakeNameAccessor(&Consumer::m_interestName), MakeNameChecker())
       .AddAttribute("LifeTime", "LifeTime for interest packet", StringValue("2s"),
@@ -79,26 +83,91 @@ Consumer::GetTypeId(void)
 }
 
 Consumer::Consumer()
-  : m_rand(CreateObject<UniformRandomVariable>())
-  , m_seq(0)
-  , m_seqMax(0) // don't request anything
+    : m_rand(CreateObject<UniformRandomVariable>())       // Used to set Nonce
+    , globalRound(0)
+    , globalSeq(0)
+    , SRTT(0)
+    , RTTVAR(0)
+    , roundRTT(0)
+    , total_response_time(0)
+    , round(0)
+    , totalAggregateTime(0)
+    , iteration(0)
+    , m_seq(0)                                            // Used to set sequence num to 0 first, and keep a count of interest and manage interest names
 {
-  NS_LOG_FUNCTION_NOARGS();
-
-  m_rtt = CreateObject<RttMeanDeviation>();
+    m_rtt = CreateObject<RttMeanDeviation>();
 }
+
+
+std::vector<std::string>
+Consumer::getProducers()
+{
+    std::ifstream file(filename);
+    std::vector<std::string> proNodes;
+    std::string line;
+    bool inRouterSection = false;
+
+    if (!file) {
+        std::cerr << "Unable to open file: " << filename << std::endl;
+        return proNodes; // Return empty if file cannot be opened
+    }
+
+    while (std::getline(file, line)) {
+        // Trim whitespace and check if the line is a section header
+        line.erase(0, line.find_first_not_of(" \t\n\r\f\v")); // Trim leading whitespace
+        if (line == "router") {
+            inRouterSection = true;
+        } else if (line == "link") {
+            break; // Exit if we reach the "link" section
+        } else if (inRouterSection) {
+            // Check if the line starts with "pro"
+            if (line.substr(0, 3) == "pro") {
+                proNodes.push_back(line);
+            }
+        }
+    }
+    file.close();
+    return proNodes;
+}
+
+
+void
+Consumer::AggregateTimeSum(int64_t aggregate_time){
+    totalAggregateTime += aggregate_time;
+    NS_LOG_DEBUG("totalAggregateTime is: " << totalAggregateTime);
+    ++iteration;
+}
+
+int64_t
+Consumer::GetAggregateTimeAverage() {
+    if (iteration == 0) {
+        NS_LOG_DEBUG("Error when calculating aggregate time!");
+        return 0;
+    }
+    return totalAggregateTime / iteration;
+}
+
+void
+Consumer::ResponseTimeSum(int64_t response_time)
+{
+    total_response_time += response_time;
+    ++round;
+}
+
+
 
 void
 Consumer::SetRetxTimer(Time retxTimer)
 {
-  m_retxTimer = retxTimer;
-  if (m_retxEvent.IsRunning()) {
-    // m_retxEvent.Cancel (); // cancel any scheduled cleanup events
-    Simulator::Remove(m_retxEvent); // slower, but better for memory
-  }
+    m_retxTimer = retxTimer;
+    if (m_retxEvent.IsRunning()) {
+        Simulator::Remove(m_retxEvent); // slower, but better for memory
+    }
 
-  // schedule even with new timeout
-  m_retxEvent = Simulator::Schedule(m_retxTimer, &Consumer::CheckRetxTimeout, this);
+    // Schedule new timeout
+    m_timeoutThreshold = 6 * m_retxTimer;
+    NS_LOG_DEBUG("Next interval to check timeout is: " << m_retxTimer.GetMilliSeconds() << " ms");
+    m_retxEvent = Simulator::Schedule(m_retxTimer, &Consumer::CheckRetxTimeout, this);
 }
 
 Time
@@ -107,40 +176,82 @@ Consumer::GetRetxTimer() const
   return m_retxTimer;
 }
 
+
 void
 Consumer::CheckRetxTimeout()
 {
-  Time now = Simulator::Now();
+    Time now = Simulator::Now();
 
-  Time rto = m_rtt->RetransmitTimeout();
-  // NS_LOG_DEBUG ("Current RTO: " << rto.ToDouble (Time::S) << "s");
+    NS_LOG_DEBUG("Check timeout after: " << m_retxTimer.GetMilliSeconds() << " ms");
+    NS_LOG_DEBUG("Current timeout threshold is: " << m_timeoutThreshold.GetMilliSeconds() << " ms");
 
-  while (!m_seqTimeouts.empty()) {
-    SeqTimeoutsContainer::index<i_timestamp>::type::iterator entry =
-      m_seqTimeouts.get<i_timestamp>().begin();
-    if (entry->time + rto <= now) // timeout expired?
-    {
-      uint32_t seqNo = entry->seq;
-      m_seqTimeouts.get<i_timestamp>().erase(entry);
-      OnTimeout(seqNo);
+    //NS_LOG_DEBUG("Start timeout check:");
+    for (auto it = m_timeoutCheck.begin(); it != m_timeoutCheck.end();){
+        if (now - it->second > m_timeoutThreshold) {
+            //NS_LOG_DEBUG("Packet " << it->first << " reach threshold, timeout triggered.");
+            std::string name = it->first;
+            it = m_timeoutCheck.erase(it);
+                OnTimeout(name);
+        } else {
+            //NS_LOG_DEBUG("No timeout for packet " << it->first);
+            ++it;
+        }
     }
-    else
-      break; // nothing else to do. All later packets need not be retransmitted
-  }
-
-  m_retxEvent = Simulator::Schedule(m_retxTimer, &Consumer::CheckRetxTimeout, this);
+    m_retxEvent = Simulator::Schedule(m_retxTimer, &Consumer::CheckRetxTimeout, this);
 }
+
+/**
+ * Compute new RTO based on response time of recent packets
+ * @param resTime
+ * @return New RTO
+ */
+Time
+Consumer::RTOMeasurement(int64_t resTime)
+{
+    if (roundRTT == 0) {
+        RTTVAR = resTime / 2;
+        SRTT = resTime;
+    } else {
+        RTTVAR = 0.75 * RTTVAR + 0.25 * std::abs(SRTT - resTime); // RTTVAR = (1 - b) * RTTVAR + b * |SRTT - RTTsample|, where b = 0.25
+        SRTT = 0.875 * SRTT + 0.125 * resTime; // SRTT = (1 - a) * SRTT + a * RTTsample, where a = 0.125
+    }
+    roundRTT++;
+    int64_t RTO = SRTT + 4 * RTTVAR; // RTO = SRTT + K * RTTVAR, where K = 4
+
+    return MilliSeconds(RTO);
+}
+
 
 // Application Methods
 void
 Consumer::StartApplication() // Called at time specified by Start
 {
-  NS_LOG_FUNCTION_NOARGS();
+    //NS_LOG_FUNCTION_NOARGS();
 
-  // do base stuff
-  App::StartApplication();
+    // Clear the log file
+    std::ofstream file1(RTO_recorder, std::ios::out);
+    if (!file1.is_open()) {
+        std::cerr << "Failed to open the file: " << RTO_recorder << std::endl;
+    }
+    file1.close();
 
-  ScheduleNextPacket();
+    std::ofstream file2(responseTime_recorder, std::ios::out);
+    if (!file2.is_open()) {
+        std::cerr << "Failed to open the file: " << responseTime_recorder << std::endl;
+    }
+    file2.close();
+
+    Simulator::Schedule(MilliSeconds(5), &Consumer::RTORecorder, this);
+
+    // do base stuff
+    App::StartApplication();
+    proNames = getProducers();
+    for (const auto& item : proNames)
+        NS_LOG_INFO("proNames: " << item);
+    if (proNames.empty())
+        NS_LOG_DEBUG("Error happened when getting producers!!!");
+
+    ScheduleNextPacket();
 }
 
 void
@@ -161,49 +272,50 @@ Consumer::SendPacket()
   if (!m_active)
     return;
 
-  NS_LOG_FUNCTION_NOARGS();
-
-  uint32_t seq = std::numeric_limits<uint32_t>::max(); // invalid
-
-  while (m_retxSeqs.size()) {
-    seq = *m_retxSeqs.begin();
-    m_retxSeqs.erase(m_retxSeqs.begin());
-    break;
+  // Aggregation time start
+  if (globalRound == 0) {
+      aggregateStartTime[globalSeq] = ns3::Simulator::Now();
   }
 
-  if (seq == std::numeric_limits<uint32_t>::max()) {
-    if (m_seqMax != std::numeric_limits<uint32_t>::max()) {
-      if (m_seq >= m_seqMax) {
-        return; // we are totally done
-      }
-    }
+  if (globalRound != proNames.size()) {
+      std::string nameString = "/" + proNames[globalRound];
+      map_agg[globalSeq].push_back(proNames[globalRound]);
+      shared_ptr<Name> name = make_shared<Name>(nameString);
+      name->appendSequenceNumber(globalSeq);
 
-    seq = m_seq++;
+      globalRound++;
+      SendInterest(name);
+  } else {
+      globalRound = 0;
+      globalSeq = ++m_seq;
   }
-
-  //
-  shared_ptr<Name> nameWithSequence = make_shared<Name>(m_interestName);
-  nameWithSequence->appendSequenceNumber(seq);
-  //
-
-  // shared_ptr<Interest> interest = make_shared<Interest> ();
-  shared_ptr<Interest> interest = make_shared<Interest>();
-  interest->setNonce(m_rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
-  interest->setName(*nameWithSequence);
-  interest->setCanBePrefix(false);
-  time::milliseconds interestLifeTime(m_interestLifeTime.GetMilliSeconds());
-  interest->setInterestLifetime(interestLifeTime);
-
-  // NS_LOG_INFO ("Requesting Interest: \n" << *interest);
-  NS_LOG_INFO("> Interest for " << seq);
-
-  WillSendOutInterest(seq);
-
-  m_transmittedInterests(interest, this, m_face);
-  m_appLink->onReceiveInterest(*interest);
-
   ScheduleNextPacket();
+
 }
+
+
+void
+Consumer::SendInterest(shared_ptr<Name> newName) {
+
+    std::string nameWithSeq = newName->toUri();
+    // Trace timeout
+    m_timeoutCheck[nameWithSeq] = ns3::Simulator::Now();
+
+    // Start response time
+    if (currentTime.find(nameWithSeq) == currentTime.end())
+        currentTime[nameWithSeq] = ns3::Simulator::Now();
+
+    shared_ptr<Interest> interest = make_shared<Interest>();
+    interest->setNonce(m_rand->GetValue(0, std::numeric_limits<uint32_t>::max()));
+    interest->setName(*newName);
+    interest->setCanBePrefix(false);
+    time::milliseconds interestLifeTime(m_interestLifeTime.GetMilliSeconds());
+    interest->setInterestLifetime(interestLifeTime);
+    NS_LOG_INFO("Sending interest >>>> " << nameWithSeq);
+    m_transmittedInterests(interest, this, m_face);
+    m_appLink->onReceiveInterest(*interest);
+}
+
 
 ///////////////////////////////////////////////////
 //          Process incoming packets             //
@@ -217,39 +329,73 @@ Consumer::OnData(shared_ptr<const Data> data)
 
   App::OnData(data); // tracing inside
 
-  NS_LOG_FUNCTION(this << data);
+  //NS_LOG_FUNCTION(this << data);
 
-  // NS_LOG_INFO ("Received content object: " << boost::cref(*data));
+  NS_LOG_INFO ("Received content object: " << boost::cref(*data));
+  NS_LOG_INFO("The incoming data packet size is: " << data->wireEncode().size());
 
-  // This could be a problem......
+  std::string dataName = data->getName().toUri();
   uint32_t seq = data->getName().at(-1).toSequenceNumber();
-  NS_LOG_INFO("< DATA for " << seq);
 
-  int hopCount = 0;
-  auto hopCountTag = data->getTag<lp::HopCountTag>();
-  if (hopCountTag != nullptr) { // e.g., packet came from local node's cache
-    hopCount = *hopCountTag;
+  m_timeoutCheck.erase(dataName);
+  NS_LOG_DEBUG("Erase packet: " << dataName << " from timeout list!");
+
+  /// Customized
+  std::string name = data->getName().get(0).toUri();
+  auto data_map = map_agg.find(seq);
+  if (data_map != map_agg.end()) {
+      auto& vec = data_map->second;
+      auto vecIt = std::find(vec.begin(), vec.end(), name);
+
+      if (vecIt != vec.end()) {
+          vec.erase(vecIt);
+      } else {
+          NS_LOG_INFO("Data name doesn't exist!");
+          return;
+      }
+
+      // RTT computation
+      if (currentTime.find(dataName) != currentTime.end()) {
+          responseTime[dataName] = ns3::Simulator::Now() - currentTime[dataName];
+          ResponseTimeSum(responseTime[dataName].GetMilliSeconds());
+          currentTime.erase(dataName);
+          NS_LOG_INFO("Consumer's response time of sequence " << dataName << " is: " << responseTime[dataName].GetMilliSeconds() << " ms");
+      }
+
+      // Record response time
+      responseTimeRecorder(responseTime[dataName]);
+
+      // Reset RetxTimer and timeout interval
+      RTO_Timer = RTOMeasurement(responseTime[dataName].GetMilliSeconds());
+      NS_LOG_DEBUG("responseTime for name : " << dataName << " is: " << responseTime[dataName].GetMilliSeconds() << " ms");
+      NS_LOG_DEBUG("RTT measurement: " << RTO_Timer.GetMilliSeconds() << " ms");
+      m_timeoutThreshold = RTO_Timer;
+
+      if (vec.empty()) {
+          NS_LOG_DEBUG("Aggregation iteration " << std::to_string(seq) << " finished!");
+
+          if (aggregateStartTime.find(seq) != aggregateStartTime.end()) {
+              aggregateTime[seq] = ns3::Simulator::Now() - aggregateStartTime[seq];
+              AggregateTimeSum(aggregateTime[seq].GetMilliSeconds());
+              aggregateStartTime.erase(seq);
+
+          } else {
+              NS_LOG_DEBUG("Error when calculating aggregation time!");
+          }
+      }
+
+      /// Stop simulation
+      if (iteration == 100) {
+          NS_LOG_DEBUG("Reach 100 iterations, stop!");
+          ns3::Simulator::Stop();
+          NS_LOG_INFO("The average aggregation time of Consumer in " << iteration << " iteration is: " << GetAggregateTimeAverage() << " ms");
+          return;
+      }
+
+  } else {
+      NS_LOG_DEBUG("Packet " << dataName << " is not in the list! Error!!!!!");
   }
-  NS_LOG_DEBUG("Hop count: " << hopCount);
 
-  SeqTimeoutsContainer::iterator entry = m_seqLastDelay.find(seq);
-  if (entry != m_seqLastDelay.end()) {
-    m_lastRetransmittedInterestDataDelay(this, seq, Simulator::Now() - entry->time, hopCount);
-  }
-
-  entry = m_seqFullDelay.find(seq);
-  if (entry != m_seqFullDelay.end()) {
-    m_firstInterestDataDelay(this, seq, Simulator::Now() - entry->time, m_seqRetxCounts[seq], hopCount);
-  }
-
-  m_seqRetxCounts.erase(seq);
-  m_seqFullDelay.erase(seq);
-  m_seqLastDelay.erase(seq);
-
-  m_seqTimeouts.erase(seq);
-  m_retxSeqs.erase(seq);
-
-  m_rtt->AckSeq(SequenceNumber32(seq));
 }
 
 void
@@ -263,35 +409,59 @@ Consumer::OnNack(shared_ptr<const lp::Nack> nack)
 }
 
 void
-Consumer::OnTimeout(uint32_t sequenceNumber)
+Consumer::OnTimeout(std::string nameString)
 {
-  NS_LOG_FUNCTION(sequenceNumber);
-  // std::cout << Simulator::Now () << ", TO: " << sequenceNumber << ", current RTO: " <<
-  // m_rtt->RetransmitTimeout ().ToDouble (Time::S) << "s\n";
-
-  m_rtt->IncreaseMultiplier(); // Double the next RTO
-  m_rtt->SentSeq(SequenceNumber32(sequenceNumber),
-                 1); // make sure to disable RTT calculation for this sample
-  m_retxSeqs.insert(sequenceNumber);
-  ScheduleNextPacket();
+    NS_LOG_DEBUG(nameString << " has timeout.");
+    shared_ptr<Name> name = make_shared<Name>(nameString);
+    SendInterest(name);
 }
 
+
+/**
+ * Record the RTT every 5 ms, store them in a file
+ */
 void
-Consumer::WillSendOutInterest(uint32_t sequenceNumber)
+Consumer::RTORecorder()
 {
-  NS_LOG_DEBUG("Trying to add " << sequenceNumber << " with " << Simulator::Now() << ". already "
-                                << m_seqTimeouts.size() << " items");
+    // Open the file using fstream in append mode
+    std::ofstream file(RTO_recorder, std::ios::app);
 
-  m_seqTimeouts.insert(SeqTimeout(sequenceNumber, Simulator::Now()));
-  m_seqFullDelay.insert(SeqTimeout(sequenceNumber, Simulator::Now()));
+    if (!file.is_open()) {
+        std::cerr << "Failed to open the file: " << RTO_recorder << std::endl;
+        return;
+    }
 
-  m_seqLastDelay.erase(sequenceNumber);
-  m_seqLastDelay.insert(SeqTimeout(sequenceNumber, Simulator::Now()));
+    // Write the response_time to the file, followed by a newline
+    file << ns3::Simulator::Now().GetMilliSeconds() << " " << RTO_Timer.GetMilliSeconds() << std::endl;
 
-  m_seqRetxCounts[sequenceNumber]++;
-
-  m_rtt->SentSeq(SequenceNumber32(sequenceNumber), 1);
+    // Close the file
+    file.close();
+    Simulator::Schedule(MilliSeconds(5), &Consumer::RTORecorder, this);
 }
+
+
+
+/**
+ * Record the response time for each returned packet, store them in a file
+ * @param responseTime
+ */
+void
+Consumer::responseTimeRecorder(Time responseTime) {
+    // Open the file using fstream in append mode
+    std::ofstream file(responseTime_recorder, std::ios::app);
+
+    if (!file.is_open()) {
+        std::cerr << "Failed to open the file: " << responseTime_recorder << std::endl;
+        return;
+    }
+
+    // Write the response_time to the file, followed by a newline
+    file << ns3::Simulator::Now().GetMilliSeconds() << " " << responseTime.GetMilliSeconds() << std::endl;
+
+    // Close the file
+    file.close();
+}
+
 
 } // namespace ndn
 } // namespace ns3

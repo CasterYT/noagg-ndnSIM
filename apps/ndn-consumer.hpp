@@ -20,7 +20,15 @@
 #ifndef NDN_CONSUMER_H
 #define NDN_CONSUMER_H
 
+
+#include <set>
+#include <map>
+#include <vector>
+#include <algorithm>
+#include <string>
+#include <numeric>
 #include "ns3/ndnSIM/model/ndn-common.hpp"
+#include "ns3/traced-value.h"
 
 #include "ndn-app.hpp"
 
@@ -48,36 +56,60 @@ namespace ndn {
  */
 class Consumer : public App {
 public:
-  static TypeId
-  GetTypeId();
+    static TypeId
+    GetTypeId();
 
   /**
    * \brief Default constructor
    * Sets up randomizer function and packet sequence number
    */
-  Consumer();
-  virtual ~Consumer(){};
+    Consumer();
+    virtual ~Consumer(){};
 
   // From App
-  virtual void
-  OnData(shared_ptr<const Data> contentObject);
+    virtual void
+    OnData(shared_ptr<const Data> contentObject);
 
   // From App
-  virtual void
-  OnNack(shared_ptr<const lp::Nack> nack);
+    virtual void
+    OnNack(shared_ptr<const lp::Nack> nack);
 
   /**
    * @brief Timeout event
    * @param sequenceNumber time outed sequence number
    */
-  virtual void
-  OnTimeout(uint32_t sequenceNumber);
+    virtual void
+    OnTimeout(std::string nameString);
 
   /**
    * @brief Actually send packet
    */
-  void
-  SendPacket();
+    void
+    SendPacket();
+
+    virtual void
+    SendInterest(shared_ptr<Name> newName);
+
+    std::vector<std::string>
+    getProducers();
+
+    void
+    ResponseTimeSum(int64_t response_time);
+
+    void
+    AggregateTimeSum(int64_t aggregate_time);
+
+    int64_t
+    GetAggregateTimeAverage();
+
+    // Based on response time, measure RTT for each round
+    Time RTOMeasurement(int64_t resTime);
+
+    // Print results in files, for testing purpose only
+    void RTORecorder();
+
+    void responseTimeRecorder(Time responseTime);
+
 
   /**
    * @brief An event that is fired just before an Interest packet is actually send out (send is
@@ -89,8 +121,6 @@ public:
    *called after
    * all processing of incoming data, potentially producing unexpected results.
    */
-  virtual void
-  WillSendOutInterest(uint32_t sequenceNumber);
 
 public:
   typedef void (*LastRetransmittedInterestDataDelayCallback)(Ptr<App> app, uint32_t seqno, Time delay, int32_t hopCount);
@@ -130,6 +160,45 @@ protected:
    */
   Time
   GetRetxTimer() const;
+
+public:
+    std::string filename = "src/ndnSIM/examples/topologies/DataCenterTopology.txt";
+    std::vector<std::string> proNames;
+    int globalRound;
+    uint32_t globalSeq;
+    bool retransmitIndicator;
+    std::map<uint32_t, std::vector<std::string>> map_agg;
+
+
+    // Timeout check/ RTO measurement
+    std::map<std::string, ns3::Time> m_timeoutCheck;
+    Time m_timeoutThreshold;
+    Time RTO_Timer;
+    int64_t SRTT;
+    int64_t RTTVAR;
+    int roundRTT;
+
+    // For testing purpose, log file
+    std::string RTO_recorder = "src/ndnSIM/examples/log/noagg_consumer_RTO_periodical.txt";
+    std::string responseTime_recorder = "src/ndnSIM/examples/log/noagg_consumer_RTT_packet.txt";
+    int suspiciousPacketCount;
+
+    // Manage a deque for calculation of RTT
+    std::deque<int64_t> averageRTT;
+
+
+    // defined for response time
+    std::map<std::string, ns3::Time> currentTime;
+    std::map<std::string, ns3::Time> responseTime;
+    int64_t total_response_time;
+    int round;
+
+    // Aggregation time
+    std::map<uint32_t, ns3::Time> aggregateStartTime;
+    std::map<uint32_t, ns3::Time> aggregateTime;
+    int64_t totalAggregateTime;
+    int iteration;
+
 
 protected:
   Ptr<UniformRandomVariable> m_rand; ///< @brief nonce generator

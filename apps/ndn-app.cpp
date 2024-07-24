@@ -26,6 +26,14 @@
 #include "model/ndn-app-link-service.hpp"
 #include "model/null-transport.hpp"
 
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <map>
+
+#include "aggregationTree.hpp"
+
 NS_LOG_COMPONENT_DEFINE("ndn.App");
 
 namespace ns3 {
@@ -77,6 +85,54 @@ App::App()
 App::~App()
 {
 }
+
+void
+App::ConstructAggregationTree() {
+
+}
+
+
+void
+App::AddLinkInfo(const std::string& filename) {
+
+}
+
+std::set<std::string>
+App::findLeafNodes(const std::string& key, const std::map<std::string, std::vector<std::string>>& treeMap)
+{
+    std::set<std::string> result;
+    auto it = treeMap.find(key);
+    if (it != treeMap.end()) {
+        for (const auto& subkey : it->second) {
+            if (treeMap.find(subkey) != treeMap.end()) {
+                auto subResult = findLeafNodes(subkey, treeMap);
+                result.insert(subResult.begin(), subResult.end());
+            } else {
+                result.insert(subkey);
+            }
+        }
+    }
+    return result;
+}
+
+
+std::map<std::string, std::set<std::string>>
+App::getLeafNodes(const std::string& key, const std::map<std::string, std::vector<std::string>>& treeMap)
+{
+    std::map<std::string, std::set<std::string>> result;
+    auto it = treeMap.find(key);
+    if (it != treeMap.end()) {
+        for (const auto& subkey : it->second) {
+            if (treeMap.find(subkey) != treeMap.end()) {
+                result[subkey] = findLeafNodes(subkey, treeMap);
+            } else {
+                result[subkey].insert(subkey);
+            }
+        }
+    }
+    return result;
+}
+
 
 void
 App::DoInitialize()
